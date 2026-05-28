@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/common/Navbar';
 import { useRouter } from 'next/navigation';
@@ -10,18 +10,7 @@ import {
   ArrowRight, ShieldAlert, CheckCircle, Volume2
 } from 'lucide-react';
 
-export default function Dashboard() {
-  const { user, token, API_BASE_URL, logout } = useAuth();
-  const router = useRouter();
-
-  // Navigation Guard
-  useEffect(() => {
-    if (!user) {
-      router.push('/login');
-    }
-  }, [user]);
-
-  if (!user) return null;
+function DashboardContent({ user, token, API_BASE_URL, logout }) {
 
   // Global State
   const [activeTab, setActiveTab] = useState(user.role === 'ADMIN' ? 'reports' : user.role === 'RECEPTIONIST' ? 'patients' : 'appointments');
@@ -53,6 +42,10 @@ export default function Dashboard() {
   const [bookingMessage, setBookingMessage] = useState('');
   const [checkinMessage, setCheckinMessage] = useState('');
 
+  // Walk-in check-in form (controlled React state — replaces getElementById reads)
+  const [walkinPatientId, setWalkinPatientId] = useState('');
+  const [walkinDoctorId, setWalkinDoctorId] = useState('');
+
   // ==========================================
   // STATE FOR DOCTOR WORKFLOWS
   // ==========================================
@@ -72,11 +65,11 @@ export default function Dashboard() {
   // ==========================================
   
   // Fetch Patients List
-  const fetchPatients = async (page = 1) => {
+  const fetchPatients = useCallback(async (page = 1) => {
     setPatientsLoading(true);
     try {
-      // Inefficient memory pagination called from client
-      const res = await fetch(`${API_BASE_URL}/patients?page=${page}&limit=5&search=${patientSearch}&gender=${patientGender}`, {
+      const params = new URLSearchParams({ page, limit: 5, search: patientSearch, gender: patientGender });
+      const res = await fetch(`${API_BASE_URL}/patients?${params}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
@@ -93,27 +86,27 @@ export default function Dashboard() {
     } finally {
       setPatientsLoading(false);
     }
-  };
+  }, [API_BASE_URL, token, patientSearch, patientGender]);
 
-  // Trigger Patient List Fetch (Every keystroke trigger re-renders parent! - Performance bug)
+  // Debounced patient fetch — waits 350 ms after last keystroke before firing
   useEffect(() => {
-    if (user.role === 'RECEPTIONIST' || user.role === 'ADMIN') {
-      fetchPatients(1);
-    }
-  }, [patientSearch, patientGender]);
+    if (user.role !== 'RECEPTIONIST' && user.role !== 'ADMIN') return;
+    const handle = setTimeout(() => fetchPatients(1), 350);
+    return () => clearTimeout(handle);
+  }, [patientSearch, patientGender, fetchPatients]);
 
   // Fetch Doctors for booking drop-down
-  const fetchDoctorsDropdown = async () => {
+  const fetchDoctorsDropdown = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/doctors`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
-      setDoctorsList(data);
+      setDoctorsList(data.doctors ?? data);
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [API_BASE_URL, token]);
 
   useEffect(() => {
     fetchDoctorsDropdown();
@@ -347,17 +340,18 @@ export default function Dashboard() {
     }
   };
 
-  // Search Doctors (SQL Injection vulnerable API!)
+  // Search Doctors
   const searchPhysiciansAdmin = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/doctors?search=${adminSearchQuery}`, {
+      const params = new URLSearchParams({ search: adminSearchQuery });
+      const res = await fetch(`${API_BASE_URL}/doctors?${params}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
-      if (Array.isArray(data)) {
-        setDoctorsList(data);
+      if (data.success) {
+        setDoctorsList(data.doctors);
       } else {
-        alert(`API Error: ${data.sqlMessage || data.error}`);
+        alert(`API Error: ${data.error}`);
       }
     } catch (e) {
       console.error(e);
@@ -740,15 +734,15 @@ export default function Dashboard() {
 
               <div className="space-y-6">
                 <div className="p-4 rounded-xl border border-teal-500/25 bg-teal-500/10 text-slate-700 dark:text-slate-300 text-xs leading-5">
-                  <strong>Token Generation Engine Note:</strong> Direct arrivals bypass appointments. The token engine automatically fetches the current days maximum token size and increments. 
-                  <span className="block mt-1 font-bold text-rose-500 uppercase tracking-wide">Warning: Vulnerable to check-in race conditions!</span>
+                  <strong>Token Generation Engine Note:</strong> Direct arrivals bypass appointments. The token engine assigns the next sequential token number for this doctor today, protected against concurrent duplicates.
                 </div>
 
                 <div className="space-y-4 text-xs font-semibold text-slate-700 dark:text-slate-300">
                   <div>
                     <label className="block mb-1">Select Walk-in Patient*</label>
                     <select
-                      id="walkin-patient"
+                      value={walkinPatientId}
+                      onChange={(e) => setWalkinPatientId(e.target.value)}
                       className="block w-full px-3 py-2 border border-slate-300 dark:border-slate-700 bg-white/50 dark:bg-slate-900/50 rounded-lg text-slate-900 dark:text-slate-100 text-sm focus:outline-none"
                     >
                       <option value="">-- Choose Patient --</option>
@@ -761,7 +755,8 @@ export default function Dashboard() {
                   <div>
                     <label className="block mb-1">Assign Physician*</label>
                     <select
-                      id="walkin-doctor"
+                      value={walkinDoctorId}
+                      onChange={(e) => setWalkinDoctorId(e.target.value)}
                       className="block w-full px-3 py-2 border border-slate-300 dark:border-slate-700 bg-white/50 dark:bg-slate-900/50 rounded-lg text-slate-900 dark:text-slate-100 text-sm focus:outline-none"
                     >
                       <option value="">-- Choose Physician --</option>
@@ -773,13 +768,11 @@ export default function Dashboard() {
 
                   <button
                     onClick={() => {
-                      const pId = document.getElementById('walkin-patient').value;
-                      const dId = document.getElementById('walkin-doctor').value;
-                      if (!pId || !dId) {
+                      if (!walkinPatientId || !walkinDoctorId) {
                         alert('Select patient and doctor first');
                         return;
                       }
-                      handleQueueCheckin(pId, dId);
+                      handleQueueCheckin(walkinPatientId, walkinDoctorId);
                     }}
                     className="glow-btn w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white dark:bg-teal-500 dark:text-slate-950 dark:hover:bg-teal-400 font-extrabold text-sm rounded-lg shadow-md transition-colors duration-300 mt-2"
                   >
@@ -889,13 +882,13 @@ export default function Dashboard() {
                 <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 text-xs space-y-2">
                   <h4 className="font-bold text-slate-400 uppercase tracking-wider">Clinical Background Information</h4>
                   
-                  {/* FRONTEND CRASH BUG:
-                      Assuming medicalHistory is always populated. Accesses a method on a nullable property
-                      without optional chaining! If medicalHistory is null (which is the case for Batman, Clark Kent, etc.),
-                      this code throws: "Cannot read properties of null (reading 'toUpperCase')" and crashes the app! */}
-                  <p className="text-slate-700 dark:text-slate-300 leading-5 text-sm font-semibold">
-                    {selectedPatientHistory.medicalHistory.toUpperCase()}
-                  </p>
+                  {selectedPatientHistory.medicalHistory ? (
+                    <p className="text-slate-700 dark:text-slate-300 leading-5 text-sm font-semibold">
+                      {selectedPatientHistory.medicalHistory.toUpperCase()}
+                    </p>
+                  ) : (
+                    <p className="text-slate-400 italic text-sm">No medical history on file for this patient.</p>
+                  )}
                 </div>
 
                 <div className="pt-2 flex justify-between items-center text-xs">
@@ -1111,7 +1104,7 @@ export default function Dashboard() {
                   type="text"
                   value={adminSearchQuery}
                   onChange={(e) => setAdminSearchQuery(e.target.value)}
-                  placeholder="Enter physician name search criteria (raw syntax supported)..."
+                  placeholder="Search physicians by name..."
                   className="block w-full pl-9 pr-3 py-2 border border-slate-300 dark:border-slate-700 bg-white/50 dark:bg-slate-900/50 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent text-sm"
                 />
               </div>
@@ -1120,19 +1113,8 @@ export default function Dashboard() {
                 onClick={searchPhysiciansAdmin}
                 className="glow-btn px-5 py-2 bg-slate-900 text-white dark:bg-teal-500 dark:text-slate-950 font-bold text-xs rounded-lg hover:bg-slate-800 dark:hover:bg-teal-400 transition-colors"
               >
-                Execute SQL Query
+                Search Registry
               </button>
-            </div>
-
-            <div className="p-3 bg-rose-500/10 text-rose-500 text-xs rounded-lg border border-rose-500/20 font-semibold leading-5 flex gap-3">
-              <ShieldAlert className="h-5 w-5 shrink-0" />
-              <div>
-                <strong>SQL Vulnerability alert:</strong> This search executes raw interpolation: 
-                <code className="block bg-black/10 dark:bg-black/30 p-1.5 rounded mt-1 font-mono">
-                  SELECT * FROM &quot;Doctor&quot; WHERE name ILIKE &apos;%&#123;query&#125;%&apos;
-                </code>
-                Can be audited by inputting standard SQL injection strings to leak full user login lists.
-              </div>
             </div>
 
             {/* Doctors Result List */}
@@ -1161,4 +1143,29 @@ export default function Dashboard() {
       </main>
     </div>
   );
+}
+
+export default function Dashboard() {
+  const { user, token, API_BASE_URL, logout } = useAuth();
+  const router = useRouter();
+
+  // Navigation Guard
+  useEffect(() => {
+    if (!user) {
+      router.push('/login');
+    }
+  }, [user, router]);
+
+  if (!user) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen">
+        <div className="pulse-loader">
+          <div></div>
+          <div></div>
+        </div>
+      </div>
+    );
+  }
+
+  return <DashboardContent user={user} token={token} API_BASE_URL={API_BASE_URL} logout={logout} />;
 }

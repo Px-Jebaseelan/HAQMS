@@ -1,71 +1,64 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-
-// Load environment variables
 dotenv.config();
 
-const authRoutes = require('./routes/auth');
-const patientRoutes = require('./routes/patients');
-const doctorRoutes = require('./routes/doctors');
+const { CORS_ORIGIN, PORT, NODE_ENV } = require('./config/env');
+
+const authRoutes        = require('./routes/auth');
+const patientRoutes     = require('./routes/patients');
+const doctorRoutes      = require('./routes/doctors');
 const appointmentRoutes = require('./routes/appointments');
-const queueRoutes = require('./routes/queue');
-const reportRoutes = require('./routes/reports');
+const queueRoutes       = require('./routes/queue');
+const reportRoutes      = require('./routes/reports');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Enable CORS for all origins (weak/broad CORS config)
-app.use(cors());
-
-// Body parser
+app.use(cors({ origin: CORS_ORIGIN, credentials: false }));
 app.use(express.json());
 
-// Simple request logger
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-// Register routes
-app.use('/api/auth', authRoutes);
-app.use('/api/patients', patientRoutes);
-app.use('/api/doctors', doctorRoutes);
+app.use('/api/auth',         authRoutes);
+app.use('/api/patients',     patientRoutes);
+app.use('/api/doctors',      doctorRoutes);
 app.use('/api/appointments', appointmentRoutes);
-app.use('/api/queue', queueRoutes);
-app.use('/api/reports', reportRoutes);
+app.use('/api/queue',        queueRoutes);
+app.use('/api/reports',      reportRoutes);
 
-// Root route
 app.get('/', (req, res) => {
-  res.json({
-    message: 'Hospital Appointment and Queue Management System (HAQMS) Backend API',
-    status: 'Running',
-    version: '1.0.0-deliberate-bugs'
-  });
+  res.json({ message: 'HAQMS Backend API', status: 'Running', version: '1.0.0' });
 });
 
-// GLOBAL ERROR HANDLER
-// BUG: Improper error handling. It returns the raw error stack trace to the client,
-// which leaks details about database types, schema layout, and file paths.
+app.get('/healthz', async (req, res) => {
+  const { PrismaClient } = require('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ status: 'ok' });
+  } catch {
+    res.status(503).json({ status: 'db_unavailable' });
+  } finally {
+    await prisma.$disconnect();
+  }
+});
+
 app.use((err, req, res, next) => {
-  console.error('[CRITICAL-ERROR]:', err);
-  res.status(500).json({
-    message: 'An unexpected internal server error occurred!',
-    error: err.message,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-  });
+  const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  console.error(`[ERROR ${requestId}]`, err);
+  res.status(err.status || 500).json({ error: 'Internal server error', requestId });
 });
 
-// Listen on port
 app.listen(PORT, () => {
   console.log(`===================================================`);
-  console.log(`   HAQMS BACKEND SERVER IS RUNNING ON PORT ${PORT}`);
-  console.log(`   ENVIRONMENT: ${process.env.NODE_ENV}`);
+  console.log(`   HAQMS BACKEND SERVER RUNNING ON PORT ${PORT}`);
+  console.log(`   ENVIRONMENT: ${NODE_ENV}`);
   console.log(`===================================================`);
 });
 
-// Catch unhandled rejections
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Intentionally do not exit process so candidates see unhandled promise logs
+process.on('unhandledRejection', (reason) => {
+  console.error('[UnhandledRejection]', reason);
 });

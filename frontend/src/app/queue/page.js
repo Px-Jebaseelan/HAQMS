@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from '@/components/common/Navbar';
 import { Activity, Bell, Monitor, RefreshCw, AlertCircle } from 'lucide-react';
 
@@ -12,47 +12,36 @@ export default function QueueMonitor() {
   // Duplicated config state just to add minor code smell
   const [refreshCount, setRefreshCount] = useState(0);
 
-  // HARDCODED API BASE URL: Duplicated from AuthContext (code duplication smell)
-  const API_BASE_URL = 'http://localhost:5000/api';
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5000/api';
 
-  const fetchQueueData = async () => {
+  const isMounted = useRef(true);
+  useEffect(() => () => { isMounted.current = false; }, []);
+
+  const fetchQueueData = useCallback(async () => {
     try {
-      // Insecure: Fetches queue without checking credentials (it's a public dashboard, which is fine, 
-      // but it uses the hardcoded API domain)
       const res = await fetch(`${API_BASE_URL}/queue`);
-      if (!res.ok) {
-        throw new Error('Failed to retrieve active token queue.');
-      }
+      if (!res.ok) throw new Error('Failed to retrieve active token queue.');
       const data = await res.json();
-      setTokens(data);
-      setError('');
+      if (isMounted.current) {
+        setTokens(data);
+        setError('');
+      }
     } catch (err) {
       console.error('Queue poll fetch error:', err);
-      setError(err.message);
+      if (isMounted.current) setError(err.message);
     } finally {
-      setLoading(false);
+      if (isMounted.current) setLoading(false);
     }
-  };
+  }, [API_BASE_URL]);
 
   useEffect(() => {
-    // Initial fetch
     fetchQueueData();
-
-    // MEMORY LEAK BUG:
-    // This setInterval has NO cleanup function (does not return clearInterval).
-    // Every time this page is mounted, a new background polling timer is spun up.
-    // If the candidate navigates between Dashboard and Queue multiple times,
-    // dozens of parallel intervals will poll the database, causing memory bloat,
-    // state update crashes on unmounted components, and heavy server load.
     const intervalId = setInterval(() => {
-      console.log(`[POLL] Active Queue Poll #${refreshCount + 1} firing...`);
       fetchQueueData();
       setRefreshCount((prev) => prev + 1);
     }, 3000);
-
-    // Junior Developer Note: "Interval created, will run forever to keep dashboard fully synced!"
-    // Missing: return () => clearInterval(intervalId);
-  }, []); // Note that refreshCount dependency is missing too, causing stale closure on log!
+    return () => clearInterval(intervalId);
+  }, [fetchQueueData]);
 
   // Group tokens by doctor
   const groupedTokens = tokens.reduce((groups, token) => {

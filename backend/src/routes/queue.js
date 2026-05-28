@@ -6,35 +6,28 @@ const router = express.Router();
 const prisma = new PrismaClient();
 
 // GET /api/queue
-// List all active queue tokens
-router.get('/', authenticate, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { doctorId, status } = req.query;
 
     const where = {};
     if (doctorId) where.doctorId = doctorId;
-    if (status) where.status = status;
+    if (status)   where.status   = status;
 
     const tokens = await prisma.queueToken.findMany({
       where,
-      include: {
-        patient: true,
-        doctor: true,
-      },
+      include: { patient: true, doctor: true },
       orderBy: { createdAt: 'asc' },
     });
 
     res.json(tokens);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to retrieve queue', details: error.message });
+    console.error('[queue:list] error:', error);
+    res.status(500).json({ error: 'Failed to retrieve queue' });
   }
 });
 
 // POST /api/queue/checkin
-// Generate a new queue token for a patient
-// CONCURRENCY/RACE CONDITION BUG: Token increment uses aggregate read followed by create.
-// Introduce a deliberate asynchronous delay (setTimeout) to force a wide race window
-// where concurrent check-ins assign the exact same token number.
 router.post('/checkin', authenticate, async (req, res) => {
   try {
     const { patientId, doctorId, appointmentId } = req.body;
@@ -43,55 +36,44 @@ router.post('/checkin', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Patient and Doctor ID are required for check-in.' });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
-    // 1. Fetch current maximum token number for this doctor today
-    const maxTokenResult = await prisma.queueToken.aggregate({
-      where: {
-        doctorId,
-        createdAt: { gte: today },
-      },
-      _max: {
-        tokenNumber: true,
-      },
+    // Use a transaction with a Postgres advisory lock to prevent concurrent duplicate tokens.
+    // pg_advisory_xact_lock is held for the duration of the transaction, serializing
+    // all concurrent check-ins for the same (doctor, day) pair.
+    const lockKey = `${doctorId}:${todayStart.toISOString().slice(0, 10)}`;
+
+    const newToken = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+
+      const maxResult = await tx.queueToken.aggregate({
+        where: { doctorId, createdAt: { gte: todayStart } },
+        _max: { tokenNumber: true },
+      });
+
+      const nextTokenNumber = (maxResult._max.tokenNumber ?? 0) + 1;
+
+      return tx.queueToken.create({
+        data: {
+          tokenNumber: nextTokenNumber,
+          patientId,
+          doctorId,
+          appointmentId: appointmentId || null,
+          status: 'WAITING',
+        },
+        include: { patient: true, doctor: true },
+      });
     });
 
-    const currentMax = maxTokenResult._max.tokenNumber || 0;
-    const nextTokenNumber = currentMax + 1;
-
-    // PERFORMANCE/CONCURRENCY BUG: Artificial sleep to widen the race condition window.
-    // In production under microservices or high load, network delay does this naturally.
-    // Junior developer comment: "Adding sleep to make sure db registers the record correctly before moving forward"
-    await new Promise((resolve) => setTimeout(resolve, 350));
-
-    // 2. Insert new token
-    const newToken = await prisma.queueToken.create({
-      data: {
-        tokenNumber: nextTokenNumber,
-        patientId,
-        doctorId,
-        appointmentId: appointmentId || null,
-        status: 'WAITING',
-      },
-      include: {
-        patient: true,
-        doctor: true,
-      },
-    });
-
-    res.status(201).json({
-      message: 'Checked in successfully. Token generated.',
-      token: newToken,
-    });
+    res.status(201).json({ message: 'Checked in successfully. Token generated.', token: newToken });
   } catch (error) {
-    console.error('Queue check-in error:', error);
-    res.status(500).json({ error: 'Check-in failed', details: error.message });
+    console.error('[queue:checkin] error:', error);
+    res.status(500).json({ error: 'Check-in failed' });
   }
 });
 
 // PATCH /api/queue/:id
-// Update token status (WAITING -> CALLING -> COMPLETED / SKIPPED)
 router.patch('/:id', authenticate, async (req, res) => {
   try {
     const { status } = req.body;
@@ -103,15 +85,13 @@ router.patch('/:id', authenticate, async (req, res) => {
     const updatedToken = await prisma.queueToken.update({
       where: { id: req.params.id },
       data: { status },
-      include: {
-        patient: true,
-        doctor: true,
-      },
+      include: { patient: true, doctor: true },
     });
 
     res.json(updatedToken);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update queue token', details: error.message });
+    console.error('[queue:patch] error:', error);
+    res.status(500).json({ error: 'Failed to update queue token' });
   }
 });
 

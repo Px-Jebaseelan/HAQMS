@@ -1,11 +1,37 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import Link from 'next/link';
-import { Activity, LogOut, LayoutDashboard, MonitorPlay, Shield } from 'lucide-react';
+import { Activity, LogOut, LayoutDashboard, MonitorPlay, Shield, Sun, Moon } from 'lucide-react';
 
 export default function Navbar() {
   const { user, logout } = useAuth();
+  const [theme, setTheme] = useState('light');
+
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('theme');
+    const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (savedTheme === 'dark' || (!savedTheme && systemPrefersDark)) {
+      setTheme('dark');
+      document.documentElement.classList.add('dark');
+    } else {
+      setTheme('light');
+      document.documentElement.classList.remove('dark');
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    if (theme === 'dark') {
+      setTheme('light');
+      localStorage.setItem('theme', 'light');
+      document.documentElement.classList.remove('dark');
+    } else {
+      setTheme('dark');
+      localStorage.setItem('theme', 'dark');
+      document.documentElement.classList.add('dark');
+    }
+  };
 
   if (!user) return null;
 
@@ -45,6 +71,14 @@ export default function Navbar() {
               {user.role}
             </span>
           </div>
+
+          <button
+            onClick={toggleTheme}
+            className="p-2 rounded-lg bg-teal-500/10 text-teal-600 dark:text-teal-400 hover:scale-105 transition-all duration-300 focus:outline-none cursor-pointer"
+            title="Toggle Theme"
+          >
+            {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+          </button>
 
           <button
             onClick={logout}
