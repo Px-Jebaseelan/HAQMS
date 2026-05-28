@@ -14,7 +14,39 @@ const reportRoutes      = require('./routes/reports');
 
 const app = express();
 
-app.use(cors({ origin: CORS_ORIGIN, credentials: false }));
+// Configure allowed origins for CORS
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://frontend-fawn-one-39.vercel.app'
+];
+
+if (CORS_ORIGIN) {
+  CORS_ORIGIN.split(',').forEach(origin => {
+    const trimmed = origin.trim();
+    if (trimmed && !allowedOrigins.includes(trimmed)) {
+      allowedOrigins.push(trimmed);
+    }
+  });
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin) return callback(null, true);
+    
+    const isAllowed = allowedOrigins.includes(origin) || 
+                      allowedOrigins.includes('*') ||
+                      origin.startsWith('http://localhost:') || 
+                      origin.endsWith('.vercel.app');
+                      
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 app.use((req, res, next) => {
